@@ -1,133 +1,116 @@
-// api/analyze.js
-import { getAreaStats } from '../lib/scraper.js';
 import { kv } from '../lib/kv.js';
 import fetch from 'node-fetch';
 
+// 导入你的自动化组件 (请确保路径正确)
+import { runFullSync } from '../lib/scraper.js';
+import { saveHousingFeatures } from '../lib/transformers/housing.js';
+import { saveTrafficFeatures } from '../lib/transformers/traffic.js';
+import { savePopulationFeatures } from '../lib/transformers/population.js';
+import { saveSafetyFeatures } from '../lib/transformers/safety.js';
+
+/**
+ * 核心逻辑：确保数据存在，如果不存在则按顺序点火
+ */
+async function ensureAndFetchFeatures(regionCode, city) {
+    console.log(`\n📦 [Step 2/4] 检查特征库完整性...`);
+    const provinceCode = 'PV27'; // 交通数据代理
+
+    // 1. 尝试直接获取
+    let features = {
+        housing: await kv.get(`features:housing:${regionCode}`),
+        traffic: await kv.get(`features:traffic:${provinceCode}`),
+        population: await kv.get(`features:population:${regionCode}`),
+        safety: await kv.get(`features:safety:${regionCode}`)
+    };
+
+    // 2. 如果数据缺失，触发“点火”流程
+    const missingData = Object.values(features).some(v => !v || v.status === 'missing');
+
+    if (missingData) {
+        console.warn(`⚠️  检测到特征库不完整，正在启动【自动化点火流程】...`);
+
+        // A. 抓取原始数据 (Scrape)
+        console.log(`   🛠️  [Pipeline] 1. 抓取远程 CBS 原始数据...`);
+        await runFullSync(regionCode); 
+
+        // B. 特征提取 (Transform) - 并行执行四个转换器
+        console.log(`   🛠️  [Pipeline] 2. 运行特征提取转换器...`);
+        const [h, t, p, s] = await Promise.all([
+            saveHousingFeatures(regionCode),
+            saveTrafficFeatures(provinceCode), // 注意交通用省代码
+            savePopulationFeatures(regionCode),
+            saveSafetyFeatures(regionCode)
+        ]);
+
+        features = { housing: h, traffic: t, population: p, safety: s };
+        console.log(`✅ [Pipeline] 全链路数据准备就绪。`);
+    } else {
+        console.log(`✅ 特征库完整，直接进入 AI 分析。`);
+    }
+
+    return features;
+}
+
 export default async function handler(req, res) {
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method Not Allowed' });
-  }
+    if (req.method !== 'POST') return res.status(405).json({ error: 'Method Not Allowed' });
 
-  const { city, pois } = req.body;
-  if (!city) {
-    return res.status(400).json({ error: 'City name is required' });
-  }
+    const { city, regionCode } = req.body;
+    console.log(`\n🚀 [Start] 收到分析请求: ${city} (${regionCode})`);
 
-  const cacheKey = `mapscale:analysis:${city.toLowerCase()}`;
+    const cacheKey = `analysis:cache:${regionCode.toLowerCase()}`;
 
-  try {
-    // 1. 缓存优先 (Upstash)
-    const cachedData = await kv.get(cacheKey);
-    if (cachedData) {
-      console.log(`[Cache] Hit for ${city}`);
-      return res.json({ ...cachedData, _fromCache: true });
-    }
-
-    // 2. 异步执行爬虫 (AlleCijfers)
-    // 包装一下，防止爬虫挂了导致整个接口挂掉
-    let scrapedData = {};
-    // try {
-    //   scrapedData = await getAreaStats(city);
-    // } catch (err) {
-    //   console.error('[Scraper Error]:', err);
-    //   scrapedData = { info: "Live statistics currently unavailable" };
-    // }
     try {
-        console.log(`--- Starting Scraper for ${city} ---`);
-        scrapedData = await getAreaStats(city);
-        
-        // 💡 调试重点：查看爬虫返回的结构
-        console.log("Scraped Data Structure:", JSON.stringify(scrapedData, null, 2));
-
-        // 如果返回了 html 源码（我们在下一步修改 scraper 加上它）
-        if (scrapedData._rawHtml) {
-            console.log("HTML Source received, length:", scrapedData._rawHtml.length);
-            // 建议：不要直接在 console 打印几万行的 HTML，太乱了。
-            // 我们把它存入 KV，你可以直接去 Upstash 查看这个 key
-            await kv.set(`debug:html:${city.toLowerCase()}`, scrapedData._rawHtml.substring(0, 50000), { ex: 3600 });
-            console.log(`[Debug] Full HTML saved to KV key: debug:html:${city.toLowerCase()}`);
+        // 1. 缓存优先
+        const cached = await kv.get(cacheKey);
+        if (cached) {
+            console.log(`⚡ [Cache Hit] 命中缓存。`);
+            return res.status(200).json({ ...cached, _cache: true });
         }
-        } catch (err) {
-        console.error('[Scraper Error]:', err);
-        scrapedData = { info: "Live statistics currently unavailable" };
-        }
+
+        // 2. 检查并自动补全数据 (核心逻辑)
+        const features = await ensureAndFetchFeatures(regionCode, city);
+
+        // 3. AI 调用
+        console.log(`🤖 [Step 3/4] 发送特征包至 AI...`);
+        const aiStartTime = Date.now();
         
-    // 3. 数据压缩 (聚合 POI 减少 Token 消耗)
-    const poiSummary = pois && Array.isArray(pois) 
-      ? pois.reduce((acc, p) => {
-          const type = p.type || 'other';
-          acc[type] = (acc[type] || 0) + 1;
-          return acc;
-        }, {})
-      : "No POI data provided";
+        const prompt = `你是荷兰房产专家。请根据以下提取的特征分析 ${city} (${regionCode})：\n${JSON.stringify(features)}`;
 
-    // 4. 构造 AI Prompt
-    const prompt = `
-      你是荷兰房地产专家。请分析 ${city} 的生活与投资潜力。
-      市场统计数据: ${JSON.stringify(scrapedData)}
-      设施分布情况: ${JSON.stringify(poiSummary)}
-      
-      任务：
-      1. 生成 3 个 Positive (优势) 和 3 个 Negative (劣势)。
-      2. 给出综合评级 (1-100)。
-      3. 必须返回严格的 JSON 格式：
-      {"score": number, "positives": [{"tag":string, "desc":string}], "negatives": [...], "summary": string}
-    `;
+        const aiResponse = await fetch('https://api.deepseek.com/chat/completions', {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${process.env.DEEPSEEK_API_TOKEN}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                model: 'deepseek-chat',
+                messages: [
+                    { role: 'system', content: 'You are a Dutch Real Estate Analyst. Output ONLY JSON.' },
+                    { role: 'user', content: prompt }
+                ],
+                response_format: { type: 'json_object' }
+            })
+        });
 
-    // 5. 调用 DeepSeek
-// 5. 调用 DeepSeek
-    console.log("--- Sending Prompt to DeepSeek ---");
-    const aiRes = await fetch('https://api.deepseek.com/chat/completions', {
-      method: 'POST',
-      headers: { 
-        'Authorization': `Bearer ${process.env.DEEPSEEK_API_TOKEN}`, 
-        'Content-Type': 'application/json' 
-      },
-      body: JSON.stringify({
-        model: 'deepseek-chat',
-        messages: [
-          { role: 'system', content: 'You are a professional Dutch real estate analyst. Output ONLY pure JSON.' },
-          { role: 'user', content: prompt }
-        ],
-        // 关键：强制返回 JSON
-        response_format: { type: 'json_object' }
-      })
-    });
+        const aiData = await aiResponse.json();
+        const analysis = JSON.parse(aiData.choices[0].message.content);
+        console.log(`🧠 [AI Complete] 耗时: ${Date.now() - aiStartTime}ms`);
 
-    const aiData = await aiRes.json();
-    
-    // 调试：看看 DeepSeek 到底回了什么
-    if (aiData.error) {
-      console.error("❌ DeepSeek API Error:", aiData.error);
-      throw new Error(`DeepSeek API Error: ${aiData.error.message}`);
+        // 4. 组装返回
+        const finalPayload = {
+            city,
+            regionCode,
+            ...analysis,
+            raw_features: features,
+            generated_at: new Date().toISOString()
+        };
+
+        await kv.set(cacheKey, finalPayload, { ex: 604800 });
+        console.log(`✨ [Success] 分析完成！`);
+        return res.status(200).json(finalPayload);
+
+    } catch (error) {
+        console.error(`💥 [Critical Error]:`, error);
+        return res.status(500).json({ error: "分析失败", details: error.message });
     }
-
-    if (!aiData.choices || aiData.choices.length === 0) {
-      console.log("Full AI Response:", JSON.stringify(aiData));
-      throw new Error('DeepSeek response invalid: Missing choices');
-    }
-
-    let rawContent = aiData.choices[0].message.content;
-    
-    // 容错处理：去掉可能存在的 Markdown 代码块标记
-    rawContent = rawContent.replace(/```json/g, '').replace(/```/g, '').trim();
-
-    let result;
-    try {
-      result = JSON.parse(rawContent);
-    } catch (parseErr) {
-      console.error("❌ JSON Parse Error. Raw content:", rawContent);
-      throw new Error("Failed to parse AI response as JSON");
-    }
-
-    // 6. 存入缓存 (有效期 7 天)
-    const finalResponse = { ...result, meta: scrapedData, timestamp: new Date() };
-    await kv.set(cacheKey, finalResponse, { ex: 60 * 60 * 24 * 7 });
-
-    return res.json(finalResponse);
-
-  } catch (error) {
-    console.error('[API Error]:', error);
-    return res.status(500).json({ error: 'Internal Server Error', details: error.message });
-  }
 }

@@ -6,8 +6,9 @@
     "deploy": "vercel --prod"
   },
   "dependencies": {
+    "@upstash/redis": "^1.25.0",
     "cheerio": "^1.0.0-rc.12",
-    "node-fetch": "^3.3.2",
-    "@upstash/redis": "^1.25.0"
+    "dotenv": "^17.3.1",
+    "node-fetch": "^3.3.2"
   }
 }

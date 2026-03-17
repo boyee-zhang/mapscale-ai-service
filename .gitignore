@@ -1,1 +1,13 @@
 .vercel
+node_modules/
+events.json
+polymarket.json
+prices.json
+analysis.json
+.env
+.env.local
+.env.vercel
+.vercel
+events.backup.*.json
+.env*.local
+data
