@@ -3,12 +3,14 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "deploy": "vercel --prod"
+    "deploy": "vercel --prod",
+    "etl:traffic": "node lib/etl/sync_traffic.js"
   },
   "dependencies": {
     "@upstash/redis": "^1.25.0",
     "cheerio": "^1.0.0-rc.12",
     "dotenv": "^17.3.1",
-    "node-fetch": "^3.3.2"
+    "node-fetch": "^3.3.2",
+    "vercel": "^50.35.0"
   }
 }

@@ -40,17 +40,15 @@ The engine consumes data from reputable Dutch and European statistical providers
 
 * Eurostat: For broader European context and cross-border comparisons.(https://ec.europa.eu/eurostat/web/main/data/database)
 
-## ⚙️ The Data Pipeline (Transformers)
-### Our unique "Self-Healing" Pipeline ensures that the AI never analyzes stale or missing data.
+### 🔄 ETL Workflow (Data Pipeline)
+The service implements a robust **ETL** (Extract, Transform, Load) architecture to ensure data quality:
 
-Implementation Details:
-1. Abstraction: Every data dimension (Housing, Safety, etc.) has a dedicated Transformer.
-
-2. Data Provenance: Since high-resolution traffic data is often unavailable at the city level, we implemented a Regional Proxy logic (using North Holland/PV27) to provide the AI with the best possible context.
-
-3. Efficiency: Transformers perform "heavy lifting" (calculating YoY growth, filtering noise) before the data hits the LLM, significantly reducing Token usage and improving AI accuracy.
-
-4. Fault Tolerance: If a feature is missing from Upstash, the analyze endpoint triggers an automatic runFullSync -> Transform sequence before proceeding.
+1. **Extract**: The `scraper.js` fetches raw JSON/OData from **CBS** and **Eurostat** API endpoints.
+2. **Transform**: 
+   - Cleanse raw data (handling nulls and Dutch-specific formatting).
+   - Perform business logic (e.g., calculating YoY housing growth or Safety Index).
+   - Apply **Regional Proxies** for missing local data (Traffic).
+3. **Load**: Save the "AI-ready" feature sets into **Upstash Redis** for low-latency retrieval.
 
 ## 🚀 Getting Started
 
